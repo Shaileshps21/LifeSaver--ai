@@ -75,3 +75,28 @@ test('wrapGroqText reports rateLimit: null when the client exposes no .withRespo
     const result = await groq.generateText('a prompt');
     assert.equal(result.rateLimit, null);
 });
+
+test('wrapGroqText tracks the latest quota on `lastRateLimit`, independent of what the caller does with the return value', async () => {
+    // This is the mechanism agentRunner.js actually reads — most agents parse
+    // the LLM response themselves inside agentFn and return their own domain
+    // object, discarding generateText()'s return value entirely. `lastRateLimit`
+    // must still reflect the most recent call regardless.
+    const client = makeGroqClientWithHeaders({
+        'x-ratelimit-limit-requests': '50',
+        'x-ratelimit-remaining-requests': '41',
+        'x-ratelimit-limit-tokens': '12000',
+        'x-ratelimit-remaining-tokens': '8000',
+    });
+    const groq = wrapGroqText(client, 'bogus-model');
+
+    assert.equal(groq.lastRateLimit, null);
+    await groq.generateText('a prompt'); // caller ignores the return value entirely
+    assert.equal(groq.lastRateLimit.remainingRequests, 41);
+    assert.equal(typeof groq.lastRateLimit.capturedAt, 'number');
+});
+
+test('wrapGroqText leaves `lastRateLimit` untouched when a call yields no headers', async () => {
+    const groq = wrapGroqText(makePlainGroqClient(), 'bogus-model');
+    await groq.generateText('a prompt');
+    assert.equal(groq.lastRateLimit, null);
+});

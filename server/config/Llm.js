@@ -355,7 +355,14 @@ function extractGroqRateLimit(headers) {
 export function wrapGroqText(groqClient, modelName, temperature = 0.3, defaultMaxTokens = 8192, fallbackFn = null) {
     const ceiling = modelCeiling(modelName);
 
-    return {
+    // A plain object, not a local variable, because most agents parse the LLM
+    // response themselves and return their own domain object from agentFn —
+    // the EnrichedResult (and its `rateLimit` field) never reaches agentRunner
+    // in that case. Tracking the last-seen quota here, on the client itself,
+    // lets agentRunner read it after ANY agent's call regardless of how that
+    // agent shapes its return value.
+    const wrapper = {
+        lastRateLimit: null,
         async generateText(prompt, { promptVersion = 'v1.0.0', maxOutputTokens, jsonMode = false } = {}) {
             const budget = Math.min(maxOutputTokens ?? defaultMaxTokens, ceiling);
 
@@ -396,6 +403,8 @@ export function wrapGroqText(groqClient, modelName, temperature = 0.3, defaultMa
                     truncated = res.choices[0]?.finish_reason === 'length';
                 }
 
+                if (rateLimit) wrapper.lastRateLimit = { ...rateLimit, capturedAt: Date.now() };
+
                 const promptTokens = res.usage?.prompt_tokens ?? 0;
                 const completionTokens = res.usage?.completion_tokens ?? 0;
                 return {
@@ -420,6 +429,7 @@ export function wrapGroqText(groqClient, modelName, temperature = 0.3, defaultMa
             }
         },
     };
+    return wrapper;
 }
 
 // ── Gemini text wrapper ───────────────────────────────────────────────────────

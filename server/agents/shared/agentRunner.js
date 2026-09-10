@@ -84,9 +84,17 @@ export async function runAgent({
                 log.provider = rawResult.provider ?? null;
                 log.model = rawResult.model ?? null;
             }
-            // Groq-only: surfaces the x-ratelimit-* headers from this call so the
-            // live SSE trace can show remaining requests/tokens for the key in use.
-            const rateLimit = rawResult?.rateLimit ?? null;
+            // Groq-only: surfaces the x-ratelimit-* headers from this agent's call(s)
+            // so the live SSE trace can show remaining requests/tokens for the key in
+            // use. Read from the client itself (wrapGroqText tracks `lastRateLimit`
+            // there) rather than `rawResult` — most agents parse the LLM response
+            // themselves inside agentFn and return their own domain object, which
+            // never carries the raw EnrichedResult's `rateLimit` field through.
+            const proRL = clients?.pro?.lastRateLimit;
+            const flashRL = clients?.flash?.lastRateLimit;
+            const rateLimit = [proRL, flashRL]
+                .filter(Boolean)
+                .sort((a, b) => b.capturedAt - a.capturedAt)[0] ?? null;
 
             // ── Step 3: Validate ──────────────────────────────────────────────
             const validation = validateAgentOutput(agentName, schemaVersion, parsed);
