@@ -19,6 +19,45 @@ const AGENT_META = {
   calendar:        { icon: '🗓️', label: 'Calendar Sync',      color: 'text-green-400',   border: 'border-green-500/30',    bg: 'bg-green-500/5'    },
 };
 
+// Compact "1.2K" style formatting for the token counter — the raw numbers
+// (often 5-6 digits) would otherwise crowd the small header badge.
+function formatCount(n) {
+  if (n === null || n === undefined) return '?';
+  if (n >= 1000) return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}K`;
+  return String(n);
+}
+
+/**
+ * RateLimitBadge — shows the most recently reported Groq quota remaining
+ * for the key currently in use. Gemini calls never populate `rateLimit`
+ * (the Generative Language API exposes no such header), so this simply
+ * never renders for a Gemini-backed run.
+ */
+function RateLimitBadge({ rateLimit }) {
+  if (!rateLimit) return null;
+  const { remainingRequests, limitRequests, remainingTokens, limitTokens } = rateLimit;
+  const lowRequests = limitRequests && remainingRequests !== null && remainingRequests / limitRequests < 0.15;
+  const lowTokens = limitTokens && remainingTokens !== null && remainingTokens / limitTokens < 0.15;
+  const low = lowRequests || lowTokens;
+
+  return (
+    <div
+      className={`flex items-center gap-2 text-[10px] font-mono px-2 py-0.5 rounded-full border ${
+        low ? 'text-warning border-warning/30 bg-warning/5' : 'text-muted border-border bg-surface-hover'
+      }`}
+      title="Remaining Groq API quota for this key, from the most recent call's rate-limit headers"
+    >
+      <span>⚡ Groq</span>
+      {remainingRequests !== null && limitRequests !== null && (
+        <span>{formatCount(remainingRequests)}/{formatCount(limitRequests)} req</span>
+      )}
+      {remainingTokens !== null && limitTokens !== null && (
+        <span>{formatCount(remainingTokens)}/{formatCount(limitTokens)} tok</span>
+      )}
+    </div>
+  );
+}
+
 function StatusDot({ status }) {
   if (status === 'done') return <span className="w-2 h-2 rounded-full bg-success flex-shrink-0" />;
   if (status === 'error') return <span className="w-2 h-2 rounded-full bg-danger flex-shrink-0" />;
@@ -100,6 +139,17 @@ export default function AgentTrace({ events, isStreaming, finalData, onDone }) {
 
   if (events.length === 0 && !isStreaming) return null;
 
+  // Newest-first scan for the last event that reported a rate-limit snapshot —
+  // each call's headers already reflect that call's own consumption, so the
+  // most recent one is the freshest picture of what's left on the key.
+  let latestRateLimit = null;
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].data?.rateLimit) {
+      latestRateLimit = events[i].data.rateLimit;
+      break;
+    }
+  }
+
   return (
     <div className="card overflow-hidden relative">
       {/* Solid accent border while streaming — replaces the old shimmer sweep
@@ -116,6 +166,7 @@ export default function AgentTrace({ events, isStreaming, finalData, onDone }) {
           <span className="w-3 h-3 rounded-full bg-success/60" />
         </div>
         <span className="font-mono text-xs text-muted">agent_trace.log</span>
+        <RateLimitBadge rateLimit={latestRateLimit} />
         {isStreaming && (
           <div className="ml-auto flex items-center gap-2 text-xs text-brand-500">
             <span className="w-1.5 h-1.5 rounded-full bg-brand-400 animate-pulse" />

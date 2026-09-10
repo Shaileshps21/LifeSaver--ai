@@ -322,6 +322,32 @@ async function withRetry(fn, { maxAttempts = 3, baseDelayMs = 1000, label = 'LLM
     throw lastErr;
 }
 
+// ── Rate-limit header extraction ─────────────────────────────────────────────
+// Groq (OpenAI-compatible) returns these on every chat/completions response —
+// see https://console.groq.com/docs/rate-limits. Gemini's Generative Language
+// API has no equivalent header, so this is Groq-only.
+function extractGroqRateLimit(headers) {
+    if (!headers?.get) return null;
+    const num = (name) => {
+        const v = headers.get(name);
+        const n = v === null ? NaN : Number(v);
+        return Number.isFinite(n) ? n : null;
+    };
+    const limitRequests = num('x-ratelimit-limit-requests');
+    const remainingRequests = num('x-ratelimit-remaining-requests');
+    const limitTokens = num('x-ratelimit-limit-tokens');
+    const remainingTokens = num('x-ratelimit-remaining-tokens');
+    if (limitRequests === null && limitTokens === null) return null; // nothing usable
+    return {
+        limitRequests,
+        remainingRequests,
+        limitTokens,
+        remainingTokens,
+        resetRequests: headers.get('x-ratelimit-reset-requests') ?? null,
+        resetTokens: headers.get('x-ratelimit-reset-tokens') ?? null,
+    };
+}
+
 // ── Groq text wrapper ─────────────────────────────────────────────────────────
 // Exported (alongside wrapGeminiText below) so the Groq→Gemini fallback wiring
 // itself — the exact bug class this comment sits next to — can be exercised
@@ -334,20 +360,31 @@ export function wrapGroqText(groqClient, modelName, temperature = 0.3, defaultMa
             const budget = Math.min(maxOutputTokens ?? defaultMaxTokens, ceiling);
 
             const call = async (tokenBudget) => withRetry(async () => {
-                const res = await groqClient.chat.completions.create({
+                const created = groqClient.chat.completions.create({
                     model: modelName,
                     messages: [{ role: 'user', content: prompt }],
                     temperature,
                     max_tokens: tokenBudget,
                     ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
                 });
+                // .withResponse() (instead of a plain await) also surfaces the raw
+                // Fetch Response so we can read Groq's x-ratelimit-* headers — the
+                // parsed body alone never exposes them. Only the real groq-sdk
+                // APIPromise has this method; fake clients used in tests return a
+                // plain Promise, so fall back to a bare await for those.
+                let res, response = null;
+                if (typeof created.withResponse === 'function') {
+                    ({ data: res, response } = await created.withResponse());
+                } else {
+                    res = await created;
+                }
                 const text = res.choices[0]?.message?.content || '';
                 if (!text.trim()) throw new EmptyResponseError(`Groq:${modelName}`);
-                return { res, text };
+                return { res, text, rateLimit: extractGroqRateLimit(response?.headers) };
             }, { label: `Groq:${modelName}` });
 
             try {
-                let { res, text } = await call(budget);
+                let { res, text, rateLimit } = await call(budget);
                 let truncated = res.choices[0]?.finish_reason === 'length';
 
                 // One-shot continuation at the model's real ceiling — a
@@ -355,7 +392,7 @@ export function wrapGroqText(groqClient, modelName, temperature = 0.3, defaultMa
                 // data, and no amount of syntax repair recovers that.
                 if (truncated && budget < ceiling) {
                     console.warn(`[Groq:${modelName}] Response truncated at ${budget} tokens — retrying once at the ${ceiling}-token ceiling.`);
-                    ({ res, text } = await call(ceiling));
+                    ({ res, text, rateLimit } = await call(ceiling));
                     truncated = res.choices[0]?.finish_reason === 'length';
                 }
 
@@ -369,6 +406,7 @@ export function wrapGroqText(groqClient, modelName, temperature = 0.3, defaultMa
                     estimatedCost: estimateCost(modelName, promptTokens, completionTokens),
                     promptVersion,
                     truncated,
+                    rateLimit,
                 };
             } catch (err) {
                 if (fallbackFn && !isAuthError(err)) {

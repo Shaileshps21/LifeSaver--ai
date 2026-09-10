@@ -84,6 +84,9 @@ export async function runAgent({
                 log.provider = rawResult.provider ?? null;
                 log.model = rawResult.model ?? null;
             }
+            // Groq-only: surfaces the x-ratelimit-* headers from this call so the
+            // live SSE trace can show remaining requests/tokens for the key in use.
+            const rateLimit = rawResult?.rateLimit ?? null;
 
             // ── Step 3: Validate ──────────────────────────────────────────────
             const validation = validateAgentOutput(agentName, schemaVersion, parsed);
@@ -147,7 +150,7 @@ export async function runAgent({
 
             // Fire agent:complete
             eventBus?.agentComplete(agentName, `${agentName} completed`, { namespace });
-            sseEmit?.(sseAgentName ?? agentName, 'done', `${agentName} completed successfully`, null);
+            sseEmit?.(sseAgentName ?? agentName, 'done', `${agentName} completed successfully`, rateLimit ? { rateLimit } : null);
 
             return parsed;
 
